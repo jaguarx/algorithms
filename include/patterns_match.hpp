@@ -43,6 +43,7 @@ struct state_entry_t {
     state_entry_t(){ fail_link = 0; jump_tbl_begin = -1;}
     state_idx_t fail_link;
     long jump_tbl_begin;
+    long jump_tbl_end;
     matched_output output;
 };
 
@@ -80,12 +81,18 @@ public:
 private:
     enum { _NOT_FOUND = -1 };
     // find value (v), return the jump table index
-    long _find(state_idx_t q, char v){
-        long idx = _state_tbl[q].jump_tbl_begin;
-        if (idx<0) return _NOT_FOUND;
-        while(_jump_tbl[idx].src == q && _jump_tbl[idx].val < v) ++idx;
-        if (idx>=_jump_tbl_size) return _NOT_FOUND;
-        if (_jump_tbl[idx].src == q && _jump_tbl[idx].val == v) return idx;
+    int _find(state_idx_t q, char v){
+        int s = _state_tbl[q].jump_tbl_begin;
+        int e = _state_tbl[q].jump_tbl_end;
+        while(s + 1 < e) {
+            int i = (s+e)/2;
+            if (_jump_tbl[i].val == v) return i;
+            if (_jump_tbl[i].val < v)
+                s = (s+e)/2;
+            else
+                e = (s+e)/2;
+        }
+        if (_jump_tbl[s].val == v) return s;
         return _NOT_FOUND;
         //return _NOT_FOUND;
     }
@@ -161,6 +168,11 @@ public:
         }
         for(int j=0; j<_states.size();++j) {
             _state_tbl[j].jump_tbl_begin = _lower_bound(j);
+            int end = _state_tbl[j].jump_tbl_begin;
+            while(end>=0 && end < _state_tbl_size && j==_jump_tbl[end].src){
+                ++end;
+            }
+            _state_tbl[j].jump_tbl_end = end;
         }
         //build fail links
         _fail(ROOT_STATE, ROOT_STATE);
@@ -204,7 +216,9 @@ public:
         }
         for(int i=0; i<_state_tbl_size;++i){
             state_entry_t& entry = _state_tbl[i];
-            oss << i<<":{f:"<<entry.fail_link<<",j:"<<entry.jump_tbl_begin<<",o:[";
+            oss << i<<":{f:"<<entry.fail_link<<",b:"
+                <<entry.jump_tbl_begin<<",e:"
+                <<entry.jump_tbl_end<<",o:[";
             for(int j=0;j<entry.output.count;++j) {
                 if (j!=0) oss << ',';
                 oss << entry.output.patterns[j];

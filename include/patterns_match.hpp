@@ -24,12 +24,83 @@
 #include <vector>
 #include <queue>
 #include <list>
+#include <cstddef>
 
 //implementation of Aho-Corasick Algorithm
 
-class patterns_matcher {
+typedef long state_idx_t;
+struct jump_entry_t {
+    state_idx_t src;
+    char val;
+    state_idx_t dst;
+};
+struct matched_output {
+    matched_output () { count = 0; patterns = NULL;}
+    int count;
+    int* patterns;
+};
+struct state_entry_t {
+    state_entry_t(){ fail_link = 0; jump_tbl_begin = -1;}
+    state_idx_t fail_link;
+    long jump_tbl_begin;
+    matched_output output;
+};
+
+class automaton_matcher{
 public:
-    typedef int state_idx_t;
+    automaton_matcher(const jump_entry_t*jmp_tbl, int jump_tbl_size, const state_entry_t* sta_tbl):
+        _jump_tbl(jmp_tbl),_jump_tbl_size(jump_tbl_size),_state_tbl(sta_tbl) { _curr = 0; }
+
+    void match(const char* text){ _text = text; _curr = 0;}
+    bool next(const char* t = NULL) {
+        if (t != NULL) _text = t;
+        state_idx_t& q = _curr;
+        for (; *_text != 0; ++_text) {
+            long i = _find(q, *_text);
+            while (_NOT_FOUND == i && _state_tbl[q].fail_link != q) {
+                q = _state_tbl[q].fail_link;
+                i = _find(q, *_text);
+            }
+            if (_NOT_FOUND != i ) {
+                q = _jump_tbl[i].dst;
+                if (_state_tbl[q].output.count > 0) {
+                    ++_text;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    const matched_output& matches() const {
+        return _state_tbl[_curr].output;
+    }
+    const char* text() const {
+        return _text;
+    }
+private:
+    enum { _NOT_FOUND = -1 };
+    // find value (v), return the jump table index
+    long _find(state_idx_t q, char v){
+        long idx = _state_tbl[q].jump_tbl_begin;
+        if (idx<0) return _NOT_FOUND;
+        while(_jump_tbl[idx].src == q && _jump_tbl[idx].val < v) ++idx;
+        if (idx>=_jump_tbl_size) return _NOT_FOUND;
+        if (_jump_tbl[idx].src == q && _jump_tbl[idx].val == v) return idx;
+        return _NOT_FOUND;
+        //return _NOT_FOUND;
+    }
+    const jump_entry_t* _jump_tbl;
+    int _jump_tbl_size;
+    const state_entry_t* _state_tbl;
+    state_idx_t _curr;
+    const char* _text;
+};
+
+class pattern_automaton{
+public:
+    enum state_idx_enum {
+        INVALID_STATE = -1, ROOT_STATE = 0
+    };
     struct trie_key_t {
         trie_key_t(state_idx_t s, char v) :
                 state(s), value(v) {
@@ -48,21 +119,22 @@ public:
             fail_state = 0;
         }
         state_idx_t fail_state;
-        std::set<void*> matched;
+        std::set<int> matched;
     };
     typedef std::vector<state_t> states_t;
-
-    patterns_matcher() {
+    pattern_automaton(const char* patterns[]):_jump_tbl(NULL),_state_tbl(NULL)
+        { _state_tbl_size = 0; _jump_tbl_size=0;build(patterns);}
+    ~pattern_automaton() {
+        delete[]_jump_tbl;
+        delete[]_state_tbl;
     }
-    patterns_matcher(const char* patterns[], void* values[]) {
-        build(patterns, values);
-    }
-
-    void build(const char* patterns[], void* values[]) {
+    void build(const char* patterns[]) {
         trie_t::iterator itr;
-        _states.resize(1); // slot for root state
-        _trie.clear();
-        for (int i = 0; patterns[i] != NULL; ++i) {
+        trie_t _trie;
+        states_t _states;
+        int i;
+        _states.resize(1);
+        for (i = 0; patterns[i] != NULL; ++i) {
             state_idx_t state = 0;
             const char* pattern = patterns[i];
             for (int j = 0; pattern[j]; ++j) {
@@ -75,24 +147,36 @@ public:
                 } else
                     state = itr->second;
             }
-            _states[state].matched.insert(values[i]);
+            _states[state].matched.insert(i);
+        }
+        _cleanup();
+        _state_tbl = new state_entry_t[_states.size()];
+        _state_tbl_size = _states.size();
+        _jump_tbl = new jump_entry_t[_trie.size()];
+        _jump_tbl_size = _trie.size();
+        for(i=0,itr = _trie.begin();itr!=_trie.end();++itr,++i){
+            _jump_tbl[i].src = itr->first.state;
+            _jump_tbl[i].val = itr->first.value;
+            _jump_tbl[i].dst = itr->second;
+        }
+        for(int j=0; j<_states.size();++j) {
+            _state_tbl[j].jump_tbl_begin = _lower_bound(j);
         }
         //build fail links
         _fail(ROOT_STATE, ROOT_STATE);
         std::queue<state_idx_t> que;
-        for (itr = _trie.begin();
-                itr != _trie.end() && itr->first.state == ROOT_STATE; ++itr) {
-            state_idx_t q = itr->second;
+        for (int l=0; l<_jump_tbl_size && _jump_tbl[l].src == ROOT_STATE; ++l) {
+            state_idx_t q = _jump_tbl[l].dst;
             _fail(q, ROOT_STATE);
             que.push(q);
         }
         while (!que.empty()) {
             state_idx_t r = que.front();
             que.pop();
-            itr = _trie.lower_bound(trie_key_t(r, 0));
-            for (; itr != _trie.end() && itr->first.state == r; ++itr) {
-                state_idx_t u = itr->second;
-                char a = itr->first.value;
+            int l = _state_tbl[r].jump_tbl_begin;
+            for (; l>0 && l < _jump_tbl_size && _jump_tbl[l].src == r; ++l) {
+                state_idx_t u = _jump_tbl[l].dst;
+                char a = _jump_tbl[l].val;
                 que.push(u);
                 state_idx_t v = _fail(r);
                 state_idx_t f = 0;
@@ -104,92 +188,73 @@ public:
                 _fail(u, f);
                 _states[u].matched.insert(_states[f].matched.begin(),
                         _states[f].matched.end());
+                _build_output(_state_tbl[u].output,_states[u].matched);
             }
         }
     }
-    void debug_dump(std::ostream& oss) const {
-        trie_t::const_iterator i1 = _trie.begin();
-        for (; i1 != _trie.end(); ++i1)
-            dump_trie_node(oss, *i1) << "\n";
-        for (int i2 = 0; i2 < _states.size(); ++i2) {
-            oss << i2 << ":{f:" << _states[i2].fail_state << ",t:"
-                    << _states[i2].matched.size() << "}\n";
-        }
+    automaton_matcher match(const char* text) {
+        automaton_matcher ret(_jump_tbl,_jump_tbl_size,_state_tbl);
+        ret.match(text);
+        return ret;
     }
-    class match_result {
-    public:
-        match_result(const trie_t& trie, const states_t& states,
-                const char* text) :
-                _trie(trie), _states(states), _text(text) {
-            _current_state = ROOT_STATE;
+    void debug_dump(std::ostream& oss) {
+        for(int i=0; i<_jump_tbl_size;++i){
+            jump_entry_t& entry = _jump_tbl[i];
+            oss << i<<":{s:"<<entry.src<<",v:'"<<entry.val<<"',d:"<<entry.dst<<"}\n";
         }
-        bool next() {
-            state_idx_t& q = _current_state;
-            for (; *_text != 0; ++_text) {
-                trie_t::const_iterator i = _trie.find(trie_key_t(q, *_text));
-                while (i == _trie.end() && _states[q].fail_state != q) {
-                    q = _states[q].fail_state;
-                    i = _trie.find(trie_key_t(q, *_text));
-                }
-                if (i != _trie.end()) {
-                    //++_text;
-                    q = i->second;
-                    if (_states[q].matched.size() > 0) {
-                        ++_text;
-                        return true;
-                    }
-                }
+        for(int i=0; i<_state_tbl_size;++i){
+            state_entry_t& entry = _state_tbl[i];
+            oss << i<<":{f:"<<entry.fail_link<<",j:"<<entry.jump_tbl_begin<<",o:[";
+            for(int j=0;j<entry.output.count;++j) {
+                if (j!=0) oss << ',';
+                oss << entry.output.patterns[j];
             }
-            return false;
+            oss<<"]}\n";
         }
-        const std::set<void*>& matches() const {
-            return _states[_current_state].matched;
-        }
-        const char* text() const {
-            return _text;
-        }
-    private:
-        const trie_t& _trie;
-        const states_t& _states;
-        state_idx_t _current_state;
-        const char* _text;
-    };
-    match_result match(const char* text) const {
-        return match_result(_trie, _states, text);
     }
 private:
-    enum state_idx_enum {
-        INVALID_STATE = -1, ROOT_STATE = 0
-    };
-    static std::ostream& dump_trie_node(std::ostream& oss,
-            const std::pair<const trie_key_t, state_idx_t>& node) {
-        return oss << "{s:" << node.first.state << ",v:'" << node.first.value
-                << "'}:" << node.second;
+    void _build_output(matched_output& o, const std::set<int>& s) {
+        o.count = s.size();
+        if (s.empty()) {
+            return;
+        }
+        o.patterns = new int[s.size()];
+        copy(s.begin(),s.end(), o.patterns);
     }
-
-    trie_t _trie;
-    states_t _states;
-
+    int _lower_bound(state_idx_t q){
+        int i=0;
+        for(; i<_jump_tbl_size;++i) {
+            if(q == _jump_tbl[i].src)
+                return i;
+        }
+        return -1;
+    }
     state_idx_t _fail(state_idx_t q) {
         state_idx_t retval = ROOT_STATE;
-        if (q < _states.size())
-            retval = _states[q].fail_state;
+        if (q >= 0)
+            retval = _state_tbl[q].fail_link;
         return retval;
     }
     void _fail(state_idx_t q1, state_idx_t q2) {
-        if (q1 < 0)
-            return;
-        if (q1 < _states.size())
-            _states[q1].fail_state = q2;
+        if (q1 < 0) return;
+        _state_tbl[q1].fail_link = q2;
     }
     state_idx_t _goto(state_idx_t q, char v) {
-        trie_key_t k(q, v);
-        trie_t::const_iterator i = _trie.find(k);
-        state_idx_t retval = INVALID_STATE;
-        if (i != _trie.end())
-            retval = i->second;
-        return retval;
+        int i=0;
+        for(int i=0; i<_jump_tbl_size;++i) {
+            if(q == _jump_tbl[i].src && v == _jump_tbl[i].val)
+                return _jump_tbl[i].dst;
+        }
+        return INVALID_STATE;
     }
+    void _cleanup() {
+        if (_jump_tbl) delete[] _jump_tbl;
+        if (_state_tbl) delete[] _state_tbl;
+    }
+    jump_entry_t* _jump_tbl;
+    int _jump_tbl_size;
+    state_entry_t* _state_tbl;
+    int _state_tbl_size;
 };
 
 #endif /* PATTERNS_MATCH_HPP_ */
